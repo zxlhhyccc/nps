@@ -20,6 +20,8 @@
                         <div id="toolbar">
                             <a href="{{.web_base_url}}/index/addhost?vkey={{.task_id}}&client_id={{.client_id}}" class="btn btn-primary dim">
                             <i class="fa fa-fw fa-lg fa-plus"></i> <span langtag="word-add"></span></a>
+                            <a href="#" onclick="batchDelete('{{.web_base_url}}/index/delhost');return false;" class="btn btn-danger dim">
+                            <i class="fa fa-fw fa-lg fa-trash"></i> <span langtag="word-batchdelete"></span></a>
                         </div>
                         <table id="taskList_table" class="table-striped table-hover"
                                data-mobile-responsive="true"></table>
@@ -45,7 +47,10 @@
             return {
                 "offset": params.offset,
                 "limit": params.limit,
-                "search": params.search
+                "search": params.search,
+                "sort": params.sort,
+                "order": params.order,
+                "client_id": {{if .client_id}}{{.client_id}}{{else}}0{{end}}
             }
         },
         search: true,
@@ -77,42 +82,56 @@
         //表格的列
         columns: [
             {
-                field: 'Id',//域值
-                title: '<span langtag="word-id"></span>',//标题
-                halign: 'center',
-                visible: true//false表示不显示
+                checkbox: true,
+                align: 'center',
+                valign: 'middle'
             },
             {
                 field: 'Id',//域值
+                title: '<span langtag="word-id"></span>',//标题
+                halign: 'center',
+                sortable: true,
+                visible: true//false表示不显示
+            },
+            {
+                field: 'ClientId',//域值
                 title: '<span langtag="word-clientid"></span>',//标题
                 halign: 'center',
+                sortable: true,
                 visible: true,//false表示不显示
                 formatter: function (value, row, index) {
-                    return row.Client.Id
+                    return row.Client.Id + '-' + row.Client.Remark
                 }
             },
             {
                 field: 'Remark',//域值
                 title: '<span langtag="word-remark"></span>',//标题
                 halign: 'center',
+                sortable: true,
                 visible: true//false表示不显示
             },
             {
                 field: 'Client.VerifyKey',//域值
                 title: '<span langtag="word-verifykey"></span>',//标题
                 halign: 'center',
+                sortable: true,
                 visible: true//false表示不显示
             },
             {
                 field: 'Host',//域值
                 title: '<span langtag="word-host"></span>',//标题
                 halign: 'center',
-                visible: true//false表示不显示
+                sortable: true,
+                visible: true,//false表示不显示
+                formatter: function (value, row, index) {
+                    return "<a href='http://" + row.Host + '{{.http_proxy_port}}'  + "' target='_blank'>" + row.Host + '{{.http_proxy_port}}' + "</a>"
+                }
             },
             {
                 field: 'Scheme',//域值
                 title: '<span langtag="word-scheme"></span>',//标题
                 halign: 'center',
+                sortable: true,
                 visible: true,//false表示不显示
                 formatter: function (value, row, index) {
                     return '<span langtag="word-' +value+ '"></span>'
@@ -122,6 +141,7 @@
                 field: 'Target',//域值
                 title: '<span langtag="word-target"></span>',//标题
                 halign: 'center',
+                sortable: true,
                 visible: true,//false表示不显示
                 formatter: function (value, row, index) {
                     return row.Target.TargetStr
@@ -131,13 +151,30 @@
                 field: 'Location',//域值
                 title: '<span langtag="word-location"></span>',//标题
                 halign: 'center',
+                sortable: true,
                 visible: true//false表示不显示
             },
             {
-                field: '',//域值
+                field: 'IsClose',//域值
+                title: '<span langtag="word-status"></span>',//内容
+                align: 'center',
+                halign: 'center',
+                sortable: true,
+                visible: true,//false表示不显示
+                formatter: function (value, row, index) {
+                    if (!value) {
+                        return '<span class="badge badge-primary" langtag="word-open"></span>'
+                    } else {
+                        return '<span class="badge badge-badge" langtag="word-close"></span>'
+                    }
+                }
+            },
+            {
+                field: 'IsConnect',//域值
                 title: '<span langtag="word-clientstatus"></span>',//内容
                 align: 'center',
                 halign: 'center',
+                sortable: true,
                 visible: true,//false表示不显示
                 formatter: function (value, row, index) {
                     hosturl = ((row.Scheme == 'http' ) ? 'http://' : 'https://') + row.Host + row.Location
@@ -156,6 +193,15 @@
                 visible: true,//false表示不显示
                 formatter: function (value, row, index) {
                     btn_group = '<div class="btn-group">'
+
+                    if (!row.IsClose) {
+                        btn_group += "<a onclick=\"submitform('stop', '{{.web_base_url}}/index/hoststop', {'id':" + row.Id
+                        btn_group += '})" class="btn btn-outline btn-warning"><i class="fa fa-pause"></i></a>'
+                    } else {
+                        btn_group += "<a onclick=\"submitform('start', '{{.web_base_url}}/index/hoststart', {\'id\':" + row.Id
+                        btn_group += '})" class="btn btn-outline btn-primary"><i class="fa fa-play"></i></a>'
+                    }
+
                     btn_group += "<a onclick=\"submitform('delete', '{{.web_base_url}}/index/delhost', {'id':" + row.Id
                     btn_group += '})" class="btn btn-outline btn-danger"><i class="fa fa-trash"></i></a>'
                     btn_group += '<a href="{{.web_base_url}}/index/edithost?id=' + row.Id

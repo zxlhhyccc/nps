@@ -35,7 +35,8 @@ type Client struct {
 	Cnf             *Config
 	Id              int        //id
 	VerifyKey       string     //verify key
-	Addr            string     //the ip of client
+	Addr            string     // client egress address as seen by server (RemoteAddr)
+	LocalAddr       string     // client private/LAN addresses reported by npc
 	Remark          string     //remark
 	Status          bool       //is allow connect
 	IsConnect       bool       //is the client connect
@@ -52,7 +53,12 @@ type Client struct {
 	MaxTunnelNum    int
 	Version         string
 	BlackIpList     []string
+	CreateTime      string
 	LastOnlineTime  string
+	IpWhite         bool     // 是否启用ip白名单
+	IpWhitePass     string   // ip授权密码
+	IpWhiteList     []string // ip白名单
+	ExpireTime      string   // 到期时间,留空表示永不过期,格式 2006-01-02 15:04:05
 	sync.RWMutex
 }
 
@@ -62,6 +68,7 @@ func NewClient(vKey string, noStore bool, noDisplay bool) *Client {
 		Id:        0,
 		VerifyKey: vKey,
 		Addr:      "",
+		LocalAddr: "",
 		Remark:    "",
 		Status:    true,
 		IsConnect: false,
@@ -110,6 +117,14 @@ func (s *Client) GetTunnelNum() (num int) {
 		}
 		return true
 	})
+
+	GetDb().JsonDb.Hosts.Range(func(key, value interface{}) bool {
+		v := value.(*Host)
+		if v.Client.Id == s.Id {
+			num++
+		}
+		return true
+	})
 	return
 }
 
@@ -140,9 +155,9 @@ type Tunnel struct {
 	Remark       string
 	TargetAddr   string
 	NoStore      bool
-	IsHttp       bool
 	LocalPath    string
 	StripPre     string
+	ProtoVersion string
 	Target       *Target
 	MultiAccount *MultiAccount
 	Health
@@ -195,25 +210,32 @@ type MultiAccount struct {
 }
 
 func (s *Target) GetRandomTarget() (string, error) {
+	s.Lock()
 	if s.TargetArr == nil {
-		s.TargetArr = strings.Split(s.TargetStr, "\n")
-	}
-	if len(s.TargetArr) == 1 {
-		return s.TargetArr[0], nil
+		arr := strings.Split(s.TargetStr, "\n")
+		s.TargetArr = make([]string, 0, len(arr))
+		for _, v := range arr {
+			v = strings.TrimRight(v, "\r")
+			if v != "" {
+				s.TargetArr = append(s.TargetArr, v)
+			}
+		}
 	}
 	if len(s.TargetArr) == 0 {
+		s.Unlock()
 		return "", errors.New("all inward-bending targets are offline")
 	}
-	s.Lock()
-	defer s.Unlock()
 	if s.nowIndex >= len(s.TargetArr)-1 {
 		s.nowIndex = -1
 	}
 	s.nowIndex++
-	return s.TargetArr[s.nowIndex], nil
+	addr := s.TargetArr[s.nowIndex]
+	s.Unlock()
+	return addr, nil
 }
 
 type Glob struct {
 	BlackIpList []string
+	ServerUrl   string
 	sync.RWMutex
 }

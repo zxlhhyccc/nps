@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 
 	"ehang.io/nps/lib/cache"
@@ -37,10 +39,14 @@ func (https *HttpsServer) Start() error {
 
 	conn.Accept(https.listener, func(c net.Conn) {
 		serverName, rb := GetServerNameFromClientHello(c)
+		if serverName == "" {
+			serverName = getFallbackServerName()
+			logs.Debug("https fallback server name result, remote addr %s, server name %q", c.RemoteAddr().String(), serverName)
+		}
 		r := buildHttpsRequest(serverName)
 		if host, err := file.GetDb().GetInfoByHost(serverName, r); err != nil {
 			c.Close()
-			logs.Debug("the url %s can't be parsed!,remote addr %s", serverName, c.RemoteAddr().String())
+			logs.Debug("https host lookup failed, server name %q, remote addr %s, error %v", serverName, c.RemoteAddr().String(), err)
 			return
 		} else {
 			if host.CertFilePath == "" || host.KeyFilePath == "" {
@@ -48,7 +54,36 @@ func (https *HttpsServer) Start() error {
 				https.handleHttps2(c, serverName, rb, r)
 			} else {
 				logs.Debug("使用上传证书")
-				https.cert(host, c, rb, host.CertFilePath, host.KeyFilePath)
+
+				// 判断是路径还是证书，-----BEGIN 开头的为证书
+				if strings.Contains(host.CertFilePath, "-----BEGIN") || strings.Contains(host.KeyFilePath, "-----BEGIN") {
+					logs.Debug("通过上传文件加载证书")
+					https.cert(host, c, rb, host.CertFilePath, host.KeyFilePath)
+				} else {
+					logs.Debug("通过路径加载证书")
+					if !common.FileExists(host.CertFilePath) || !common.FileExists(host.KeyFilePath) {
+						c.Close()
+						logs.Error("证书或秘钥文件不存在", host.KeyFilePath, host.CertFilePath)
+						return
+					}
+
+					cert, err := common.ReadAllFromFile(host.CertFilePath)
+					if err != nil {
+						c.Close()
+						logs.Error("加载证书失败", err)
+						return
+					}
+					key, err := common.ReadAllFromFile(host.KeyFilePath)
+					if err != nil {
+						c.Close()
+						logs.Error("加载证书秘钥失败", err)
+						return
+					}
+
+					https.cert(host, c, rb, string(cert), string(key))
+
+				}
+
 			}
 		}
 	})
@@ -110,6 +145,35 @@ func (https *HttpsServer) Start() error {
 	return nil
 }
 
+func getFallbackServerName() string {
+	global := file.GetDb().GetGlobal()
+	if global == nil {
+		return ""
+	}
+	serverName := strings.TrimSpace(global.ServerUrl)
+	if serverName == "" {
+		return ""
+	}
+	if strings.Contains(serverName, "://") {
+		if u, err := url.Parse(serverName); err == nil && u.Host != "" {
+			serverName = u.Host
+		}
+	}
+	if i := strings.Index(serverName, "/"); i >= 0 {
+		serverName = serverName[:i]
+	}
+	serverName = common.GetIpByAddr(serverName)
+	serverName = strings.TrimSpace(serverName)
+	if serverName == "" {
+		return ""
+	}
+	ip := net.ParseIP(serverName)
+	if ip != nil && ip.IsUnspecified() {
+		return ""
+	}
+	return serverName
+}
+
 func (https *HttpsServer) cert(host *file.Host, c net.Conn, rb []byte, certFileUrl string, keyFileUrl string) {
 	var l *HttpsListener
 	i := 0
@@ -129,14 +193,14 @@ func (https *HttpsServer) cert(host *file.Host, c net.Conn, rb []byte, certFileU
 					}
 					https.httpsListenerMap.Delete(value)
 					https.hostIdCertMap.Delete(key)
-					logs.Info("Listener 已释放")
+					logs.Debug("Listener 已释放")
 				}
 			}
 		}
 		return true
 	})
 
-	logs.Info("当前 Listener 连接数量", i)
+	logs.Debug("当前 Listener 连接数量", i)
 
 	if cert, ok := https.hostIdCertMap.Load(host.Id); ok {
 		if cert == certFileUrl {
@@ -195,7 +259,7 @@ func (https *HttpsServer) handleHttps2(c net.Conn, hostName string, rb []byte, r
 		logs.Warn(err.Error())
 	}
 	logs.Info("new https connection,clientId %d,host %s,remote address %s", host.Client.Id, r.Host, c.RemoteAddr().String())
-	https.DealClient(conn.NewConn(c), host.Client, targetAddr, rb, common.CONN_TCP, nil, host.Client.Flow, host.Target.LocalProxy, nil)
+	https.DealClient(conn.NewConn(c), host.Client, targetAddr, rb, common.CONN_TCP, nil, host.Client.Flow, host.Target.LocalProxy, nil, host)
 }
 
 // close
@@ -238,7 +302,7 @@ func (https *HttpsServer) handleHttps(c net.Conn) {
 		logs.Warn(err.Error())
 	}
 	logs.Trace("new https connection,clientId %d,host %s,remote address %s", host.Client.Id, r.Host, c.RemoteAddr().String())
-	https.DealClient(conn.NewConn(c), host.Client, targetAddr, rb, common.CONN_TCP, nil, host.Client.Flow, host.Target.LocalProxy, nil)
+	https.DealClient(conn.NewConn(c), host.Client, targetAddr, rb, common.CONN_TCP, nil, host.Client.Flow, host.Target.LocalProxy, nil, host)
 }
 
 type HttpsListener struct {
@@ -270,27 +334,41 @@ func (httpsListener *HttpsListener) Addr() net.Addr {
 	return httpsListener.parentListener.Addr()
 }
 
-// get server name from connection by read client hello bytes
+// get server name from connection by read full client hello bytes
 func GetServerNameFromClientHello(c net.Conn) (string, []byte) {
-	buf := make([]byte, 4096)
-	data := make([]byte, 4096)
-	n, err := c.Read(buf)
+	header := make([]byte, 5)
+	headerN, err := io.ReadFull(c, header)
 	if err != nil {
-		return "", nil
+		return "", header[:headerN]
 	}
-	if n < 42 {
-		return "", nil
+	if header[0] != 0x16 {
+		return "", header
 	}
-	copy(data, buf[:n])
+	recordLen := int(header[3])<<8 | int(header[4])
+	if recordLen <= 0 || recordLen > 16384 {
+		return "", header
+	}
+
+	body := make([]byte, recordLen)
+	bodyN, err := io.ReadFull(c, body)
+	if err != nil {
+		return "", append(header, body[:bodyN]...)
+	}
+
+	rawBytes := append(header, body...)
 	clientHello := new(crypt.ClientHelloMsg)
-	clientHello.Unmarshal(data[5:n])
-	return clientHello.GetServerName(), buf[:n]
+	if !clientHello.Unmarshal(body) {
+		return "", rawBytes
+	}
+	return clientHello.GetServerName(), rawBytes
 }
 
-// build https request
+// build https request for SNI-based host lookup.
+// RequestURI is set to "*" to skip Location filtering in GetInfoByHost,
+// because at TLS handshake stage the actual HTTP request path is unknown.
 func buildHttpsRequest(hostName string) *http.Request {
 	r := new(http.Request)
-	r.RequestURI = "/"
+	r.RequestURI = "*"
 	r.URL = new(url.URL)
 	r.URL.Scheme = "https"
 	r.Host = hostName

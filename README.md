@@ -1,110 +1,81 @@
 # NPS
 
-[README](https://github.com/ehang-io/nps/blob/master/README.md)|[中文文档](https://github.com/ehang-io/nps/blob/master/README_zh.md)
+![Version](https://img.shields.io/badge/version-v0.26.38-blue)
+![License](https://img.shields.io/badge/license-GPL--3.0-green)
+![Go](https://img.shields.io/badge/Go-%3E%3D1.22-00ADD8?logo=go)
 
-# 说明
-由于nps已经有二年多的时间没有更新了，存留了不少bug和未完善的功能。
+> 一款轻量级、高性能、功能强大的内网穿透代理服务器，基于 [ehang-io/nps](https://github.com/ehang-io/nps) 0.26.10 二次开发 —— 修复大量 bug，持续更新中。  
+> 💬 聊天灌水 QQ 群：**619833483**（热心群主可提供免费远程协助）
 
-此版本基于 nps 0.26.10的基础上二次开发而来。
+### 📖 在线文档
+<small>[完整文档](https://yisier.github.io/nps) · [更新日志](https://yisier.github.io/nps/changelog/) · [程序安装](https://yisier.github.io/nps/install/#%E7%A8%8B%E5%BA%8F%E5%AE%89%E8%A3%85) · [宝塔面板](https://yisier.github.io/nps/install/#%E5%AE%9D%E5%A1%94%E9%9D%A2%E6%9D%BF-%E4%B8%80%E9%94%AE%E9%83%A8%E7%BD%B2) · [Docker安装](https://yisier.github.io/nps/install/#docker-%E5%AE%89%E8%A3%85)</small>
 
-***DockerHub***： [NPS](https://hub.docker.com/r/yisier1/nps) [NPC](https://hub.docker.com/r/yisier1/npc)
+---
+## 💰 赞助 / 推荐
+#### 【腾讯云】[2核2G4M 服务器新客99元/年起](https://cloud.tencent.com/act/cps/redirect?redirect=6544&cps_key=de079542f18563fceb5c9b687dad2943&from=console)
 
-# 交流群
-聊天灌水QQ群：619833483
-
-# 特价云服务器  
-国内BGP，游戏开服，2核 2G 15M上行 25元/月，[专属连接，首月5折](https://www.rainyun.com/MjY0MzY1_)
-
-  
-# 捐赠
-![image](image/new/payCode.png)
+####  【NATNPS 云穿透】 — [无需自备服务器，注册即用，免费 3M 带宽 / 2 条隧道](https://natnps.com/register?utm_from=MQ==)
 
 
+---
+## 🚀 快速开始
 
-## 更新日志  
-- 2024-05-28  v0.26.19  
-  - golang 版本升级到 1.22.
-  - 增加自动https，自动将http 重定向（301）到 https.  
-  - 客户端命令行方式启动支持多个隧道ID，使用逗号拼接，示例：`npc -server=xxx:8024 -vkey=ytkpyr0er676m0r7,iwnbjfbvygvzyzzt` .
-  - 移除 nps.conf 参数 `https_just_proxy` , 调整 https 处理逻辑，如果上传了 https 证书，则由nps负责SSL (此方式可以获取真实IP)，
-      否则走端口转发模式（使用本地证书,nps 获取不到真实IP）， 如下图所示。    
-    ![image](image/new/https.png)
+### 下载
 
+从 [releases](https://github.com/yisier/nps/releases) 下载对应平台版本。服务端 `nps` 和客户端 `npc` 是独立的压缩包。
 
+### 服务端
 
-- 2024-02-27  v0.26.18  
-  ***新增***：nps.conf 新增 `tls_bridge_port=8025` 参数，当 `tls_enable=true` 时，nps 会监听8025端口，作为 tls 的连接端口。  
-             客户端可以选择连接 tls 端口或者非 tls 端口： `npc.exe  -server=xxx:8024 -vkey=xxx` 或 `npc.exe  -server=xxx:8025 -vkey=xxx -tls_enable=true`
-  
-  
-- 2024-01-31  v0.26.17  
-  ***说明***：考虑到 npc 历史版本客户端众多，版本号不同旧版本客户端无法连接，为了兼容，仓库版本号将继续沿用 0.26.xx
+```shell
+./nps -server    # 交互菜单：安装/卸载/启动/停止/更新
+```
 
+首次启动自动生成 `conf/nps.conf`，随机生成 `web_password`、`auth_key`、`auth_crypt_key`，请从启动日志或 `nps.conf` 获取。
 
-- 2024-01-02  v0.27.01  (已作废，功能移动到v0.26.17 版本)  
-  ***新增***：tls 流量加密，(客户端忽略证书校验，谨慎使用，客户端与服务端需要同时开启，或同时关闭)，使用方式：   
-             服务端：nps.conf `tls_enable=true`;    
-             客户端：npc.conf `tls_enable=true` 或者 `npc.exe  -server=xxx -vkey=xxx -tls_enable=true`  
+![img](https://raw.githubusercontent.com/yisier/nps/master/docs/.vuepress/public/image/new/server.png)
 
-  
-- 2023-06-01  v0.26.16  
-  ***修复***：https 流量不统计 Bug 修复。  
-  ***新增***：新增全局黑名单IP，用于防止被肉鸡扫描端口或被恶意攻击。  
-  ***新增***：新增客户端上次在线时间。
+### 客户端
+
+```shell
+./npc            # 直接双击运行，按提示输入即可
+```
+
+在 Web 后台复制【快捷启动命令】，客户端粘贴即可注册系统服务、启停或卸载。
 
 
-- 2023-02-24  v0.26.15  
-  ***修复***：更新程序 url 更改到当前仓库中   
-  ***修复***：nps 在外部路径启动时找不到配置文件  
-  ***新增***：增加 nps 启动参数，`-conf_path=D:\test\nps`,可用于加载指定nps配置文件和web文件目录。  
-  ***window 使用示例：***  
-  直接启动：`nps.exe -conf_path=D:\test\nps`  
-  安装：`nps.exe install -conf_path=D:\test\nps`    
-  安装启动：`nps.exe start`      
-
-  ***linux 使用示例：***    
-  直接启动：`./nps -conf_path=/app/nps`  
-  安装：`./nps install -conf_path=/app/nps`  
-  安装启动：`nps start -conf_path=/app/nps`  
+![image](https://raw.githubusercontent.com/yisier/nps/master/docs/.vuepress/public/image/new/cmd.png)
 
 
+#### GUI
 
-- 2022-12-30  v0.26.14  
-  ***修复***：API 鉴权漏洞修复
-
-
-- 2022-12-19  
-***修复***：某些场景下丢包导致服务端意外退出  
-***优化***：新增隧道时，不指定服务端口时，将自动生成端口号  
-***优化***：API返回ID, `/client/add/, /index/addhost/，/index/add/ `   
-***优化***：域名解析、隧道页面，增加[唯一验证密钥]，方便搜查  
+![image](https://yisier.github.io/nps/image/new/gui.png)
 
 
-- 2022-10-30   
-***新增***：在管理面板中新增客户端时，可以配置多个黑名单IP，用于防止被肉鸡扫描端口或被恶意攻击。  
-***优化***：0.26.12 版本还原了注册系统功能，使用方式和以前一样。无论是否注册了系统服务，直接执行 nps 时只会读取当前目录下的配置文件。
+#### 命令行直接启动
+
+```shell
+npc -server=ip:8024 -vkey=xxx                           # 标准
+npc -server=ip:8025 -vkey=xxx -tls_enable=true           # TLS 桥接
+npc -server=ip:8024 -vkey=vkey1,vkey2                    # 多隧道
+```
 
 
-- 2022-10-27  
-***新增***：在管理面板登录时开启验证码校验，开启方式：nps.conf `open_captcha=true`，感谢 [@dongFangTuring](https://github.com/dongFangTuring) 提供的PR  
+---
 
-  
-- 2022-10-24:     
-***修复***：HTTP协议支持WebSocket(稳定性待测试)
-  
+## ☕ 请作者喝杯咖啡
+> 如果这个项目帮到了你，可以请作者喝杯咖啡 ☕ 感谢支持！
 
-- 2022-10-21:   
-***修复***：HTTP协议下实时统计流量，能够精准的限制住流量（上下行对等）  
-***优化***：删除HTTP隧道时，客户端已用流量不再清空
+![微信/支付宝扫码赞赏](docs/.vuepress/public/image/payme.png)
 
 
-- 2022-10-19:  
-***BUG***：在TCP协议下，流量统计有问题，只有当连接断开时才会统计流量。例如，限制客户端流量20m,当传输100m的文件时，也能传输成功。  
-***修复***：TCP协议下实时统计流量，能够精准的限制住流量（上下行对等）  
-***优化***：删除TCP隧道时，客户端已用流量不再清空
-![image](image/new/tcp_limit.png)
+---
 
+## 📈 Star History
 
-- 2022-09-14:  
-修改NPS工作目录为当前可执行文件目录（即配置文件和nps可执行文件放在同一目录下，直接执行nps文件即可），去除注册系统服务，启动、停止、升级等命令
+[![Star History Chart](https://star-history.dera.page/svg?repos=yisier/nps&type=Date)](https://star-history.dera.page/#yisier/nps&Date)
 
+---
+
+## 📃 License
+
+GPL-3.0 License — 基于 [ehang-io/nps](https://github.com/ehang-io/nps) 0.26.10 二次开发。

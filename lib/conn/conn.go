@@ -39,10 +39,10 @@ func (s *Conn) readRequest(buf []byte) (n int, err error) {
 	var rd int
 	for {
 		rd, err = s.Read(buf[n:])
+		n += rd
 		if err != nil {
 			return
 		}
-		n += rd
 		if n < 4 {
 			continue
 		}
@@ -61,10 +61,12 @@ func (s *Conn) readRequest(buf []byte) (n int, err error) {
 func (s *Conn) GetHost() (method, address string, rb []byte, err error, r *http.Request) {
 	var b [32 * 1024]byte
 	var n int
-	if n, err = s.readRequest(b[:]); err != nil {
+	if n, err = s.readRequest(b[:]); n > 0 {
+		rb = b[:n]
+	}
+	if err != nil {
 		return
 	}
-	rb = b[:n]
 	r, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(rb)))
 	if err != nil {
 		return
@@ -374,7 +376,7 @@ func SetUdpSession(sess *kcp.UDPSession) {
 
 //conn1 mux conn
 func CopyWaitGroup(conn1, conn2 net.Conn, crypt bool, snappy bool, rate *rate.Rate,
-	flow *file.Flow, isServer bool, rb []byte, task *file.Tunnel) {
+	flow *file.Flow, isServer bool, rb []byte, task *file.Tunnel, host *file.Host) {
 	//var in, out int64
 	//var wg sync.WaitGroup
 	connHandle := GetConn(conn1, crypt, snappy, rate, isServer)
@@ -397,7 +399,7 @@ func CopyWaitGroup(conn1, conn2 net.Conn, crypt bool, snappy bool, rate *rate.Ra
 	//}
 	wg := new(sync.WaitGroup)
 	wg.Add(1)
-	err := goroutine.CopyConnsPool.Invoke(goroutine.NewConns(connHandle, conn2, flow, wg, task))
+	err := goroutine.CopyConnsPool.Invoke(goroutine.NewConns(connHandle, conn2, flow, wg, task, host))
 	wg.Wait()
 	if err != nil {
 		logs.Error(err)

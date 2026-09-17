@@ -59,7 +59,7 @@
 	$.fn.cloudLang = function () {
 		$.ajax({
 			type: 'GET',
-			url: window.nps.web_base_url + '/static/page/languages.xml?v=20240528',
+			url: window.nps.web_base_url + '/static/page/languages.xml?v=' + window.nps.version,
 			dataType: 'xml',
 			success: function (xml) {
 				languages['content'] = xml2json($(xml).children())['content'];
@@ -132,24 +132,30 @@ var chartdatas = {};
 var postsubmit;
 
 function langreply(langstr) {
+    if (!languages || !languages['content'] || !languages['content']['reply']) return langstr;
     var langobj = languages['content']['reply'][langstr.replace(/[\s,\.\?]*/g,"").toLowerCase()];
     if ($.type(langobj) == 'undefined') return langstr
     langobj = (langobj[languages['current']] || langobj[languages['default']] || langstr);
     return langobj
 }
 
+var nps_submitting = false;
+var nps_batch_submitting = false;
 function submitform(action, url, postdata) {
+    if (nps_submitting) return;
     postsubmit = false;
     switch (action) {
         case 'start':
         case 'stop':
         case 'delete':
-            var langobj = languages['content']['confirm'][action];
-            action = (langobj[languages['current']] || langobj[languages['default']] || 'Are you sure you want to ' + action + ' it?');
-            if (! confirm(action)) return;
+		case 'copy':
+            var confirmObj = (languages && languages['content'] && languages['content']['confirm']) ? languages['content']['confirm'][action] : null;
+            var confirmMsg = (confirmObj && (confirmObj[languages['current']] || confirmObj[languages['default']])) || ('Are you sure you want to ' + action + ' it?');
+            if (! confirm(confirmMsg)) return;
             postsubmit = true;
         case 'add':
         case 'edit':
+            nps_submitting = true;
             $.ajax({
                 type: "POST",
                 url: url,
@@ -157,12 +163,20 @@ function submitform(action, url, postdata) {
                 success: function (res) {
                     alert(langreply(res.msg));
                     if (res.status) {
-                        if (postsubmit) {document.location.reload();}else{history.back(-1);}
+                        if (postsubmit) {
+							document.location.reload();
+						}else{
+							window.location.href= document.referrer
+						}
                     }
+                },
+                complete: function () {
+                    nps_submitting = false;
                 }
             });
 			return;
 		case 'global':
+			nps_submitting = true;
 			$.ajax({
 				type: "POST",
 				url: url,
@@ -172,6 +186,9 @@ function submitform(action, url, postdata) {
 					if (res.status) {
 						document.location.reload();
 					}
+				},
+				complete: function () {
+					nps_submitting = false;
 				}
 			});
     }
@@ -196,4 +213,45 @@ function changeunit(limit) {
         return sizeStr.substring(0, index) + sizeStr.substr(index + 3, 2);
     }
     return size;
+}
+
+function batchDelete(url) {
+    var rows = $('#table').bootstrapTable('getSelections');
+    if (rows.length === 0) {
+        alert(languages && languages['content'] && languages['content']['confirm'] && languages['content']['confirm']['noselected']
+            ? (languages['content']['confirm']['noselected'][languages['current']] || languages['content']['confirm']['noselected'][languages['default']] || 'Please select items to delete.')
+            : 'Please select items to delete.');
+        return;
+    }
+    var confirmObj = (languages && languages['content'] && languages['content']['confirm']) ? languages['content']['confirm']['delete'] : null;
+    var confirmMsg = (confirmObj && (confirmObj[languages['current']] || confirmObj[languages['default']])) || ('Are you sure you want to delete ' + rows.length + ' items?');
+    if (!confirm(confirmMsg + ' (' + rows.length + ' ' + (rows.length > 1 ? 'items' : 'item') + ')')) return;
+    if (nps_batch_submitting) return;
+    nps_batch_submitting = true;
+    var ids = [];
+    for (var i = 0; i < rows.length; i++) {
+        ids.push(rows[i].Id);
+    }
+    var idx = 0;
+    function next() {
+        if (idx >= ids.length) {
+            nps_batch_submitting = false;
+            document.location.reload();
+            return;
+        }
+        $.ajax({
+            type: "POST",
+            url: url,
+            data: { id: ids[idx] },
+            success: function (res) {
+                idx++;
+                next();
+            },
+            error: function () {
+                idx++;
+                next();
+            }
+        });
+    }
+    next();
 }

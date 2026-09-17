@@ -51,7 +51,7 @@ type Sock5ModeServer struct {
 	listener net.Listener
 }
 
-//req
+// req
 func (s *Sock5ModeServer) handleRequest(c net.Conn) {
 	/*
 		The SOCKS request is formed as follows:
@@ -84,7 +84,7 @@ func (s *Sock5ModeServer) handleRequest(c net.Conn) {
 	}
 }
 
-//reply
+// reply
 func (s *Sock5ModeServer) sendReply(c net.Conn, rep uint8) {
 	reply := []byte{
 		5,
@@ -105,25 +105,50 @@ func (s *Sock5ModeServer) sendReply(c net.Conn, rep uint8) {
 	c.Write(reply)
 }
 
-//do conn
+// do conn
 func (s *Sock5ModeServer) doConnect(c net.Conn, command uint8) {
 	addrType := make([]byte, 1)
-	c.Read(addrType)
+	if _, err := io.ReadFull(c, addrType); err != nil {
+		logs.Warn("read addr type error", err)
+		s.sendReply(c, serverFailure)
+		c.Close()
+		return
+	}
 	var host string
 	switch addrType[0] {
 	case ipV4:
 		ipv4 := make(net.IP, net.IPv4len)
-		c.Read(ipv4)
+		if _, err := io.ReadFull(c, ipv4); err != nil {
+			logs.Warn("read ipv4 error", err)
+			s.sendReply(c, serverFailure)
+			c.Close()
+			return
+		}
 		host = ipv4.String()
 	case ipV6:
 		ipv6 := make(net.IP, net.IPv6len)
-		c.Read(ipv6)
+		if _, err := io.ReadFull(c, ipv6); err != nil {
+			logs.Warn("read ipv6 error", err)
+			s.sendReply(c, serverFailure)
+			c.Close()
+			return
+		}
 		host = ipv6.String()
 	case domainName:
 		var domainLen uint8
-		binary.Read(c, binary.BigEndian, &domainLen)
+		if err := binary.Read(c, binary.BigEndian, &domainLen); err != nil {
+			logs.Warn("read domain len error", err)
+			s.sendReply(c, serverFailure)
+			c.Close()
+			return
+		}
 		domain := make([]byte, domainLen)
-		c.Read(domain)
+		if _, err := io.ReadFull(c, domain); err != nil {
+			logs.Warn("read domain error", err)
+			s.sendReply(c, serverFailure)
+			c.Close()
+			return
+		}
 		host = string(domain)
 	default:
 		s.sendReply(c, addrTypeNotSupported)
@@ -131,7 +156,12 @@ func (s *Sock5ModeServer) doConnect(c net.Conn, command uint8) {
 	}
 
 	var port uint16
-	binary.Read(c, binary.BigEndian, &port)
+	if err := binary.Read(c, binary.BigEndian, &port); err != nil {
+		logs.Warn("read port error", err)
+		s.sendReply(c, serverFailure)
+		c.Close()
+		return
+	}
 	// connect to host
 	addr := net.JoinHostPort(host, strconv.Itoa(int(port)))
 	var ltype string
@@ -142,11 +172,11 @@ func (s *Sock5ModeServer) doConnect(c net.Conn, command uint8) {
 	}
 	s.DealClient(conn.NewConn(c), s.task.Client, addr, nil, ltype, func() {
 		s.sendReply(c, succeeded)
-	}, s.task.Flow, s.task.Target.LocalProxy, nil)
+	}, s.task.Flow, s.task.Target.LocalProxy, nil, nil)
 	return
 }
 
-//conn
+// conn
 func (s *Sock5ModeServer) handleConnect(c net.Conn) {
 	s.doConnect(c, connectMethod)
 }
@@ -176,22 +206,42 @@ func (s *Sock5ModeServer) sendUdpReply(writeConn net.Conn, c net.Conn, rep uint8
 func (s *Sock5ModeServer) handleUDP(c net.Conn) {
 	defer c.Close()
 	addrType := make([]byte, 1)
-	c.Read(addrType)
+	if _, err := io.ReadFull(c, addrType); err != nil {
+		logs.Warn("read addr type error", err)
+		s.sendReply(c, serverFailure)
+		return
+	}
 	var host string
 	switch addrType[0] {
 	case ipV4:
 		ipv4 := make(net.IP, net.IPv4len)
-		c.Read(ipv4)
+		if _, err := io.ReadFull(c, ipv4); err != nil {
+			logs.Warn("read ipv4 error", err)
+			s.sendReply(c, serverFailure)
+			return
+		}
 		host = ipv4.String()
 	case ipV6:
 		ipv6 := make(net.IP, net.IPv6len)
-		c.Read(ipv6)
+		if _, err := io.ReadFull(c, ipv6); err != nil {
+			logs.Warn("read ipv6 error", err)
+			s.sendReply(c, serverFailure)
+			return
+		}
 		host = ipv6.String()
 	case domainName:
 		var domainLen uint8
-		binary.Read(c, binary.BigEndian, &domainLen)
+		if err := binary.Read(c, binary.BigEndian, &domainLen); err != nil {
+			logs.Warn("read domain len error", err)
+			s.sendReply(c, serverFailure)
+			return
+		}
 		domain := make([]byte, domainLen)
-		c.Read(domain)
+		if _, err := io.ReadFull(c, domain); err != nil {
+			logs.Warn("read domain error", err)
+			s.sendReply(c, serverFailure)
+			return
+		}
 		host = string(domain)
 	default:
 		s.sendReply(c, addrTypeNotSupported)
@@ -199,8 +249,12 @@ func (s *Sock5ModeServer) handleUDP(c net.Conn) {
 	}
 	//读取端口
 	var port uint16
-	binary.Read(c, binary.BigEndian, &port)
-	logs.Warn(host, string(port))
+	if err := binary.Read(c, binary.BigEndian, &port); err != nil {
+		logs.Warn("read port error", err)
+		s.sendReply(c, serverFailure)
+		return
+	}
+	logs.Warn(host, strconv.Itoa(int(port)))
 	replyAddr, err := net.ResolveUDPAddr("udp", s.task.ServerIp+":0")
 	if err != nil {
 		logs.Error("build local reply addr error", err)
@@ -216,7 +270,7 @@ func (s *Sock5ModeServer) handleUDP(c net.Conn) {
 	s.sendUdpReply(c, reply, succeeded, common.GetServerIpByClientIp(c.RemoteAddr().(*net.TCPAddr).IP))
 	defer reply.Close()
 	// new a tunnel to client
-	link := conn.NewLink("udp5", "", s.task.Client.Cnf.Crypt, s.task.Client.Cnf.Compress, c.RemoteAddr().String(), false)
+	link := conn.NewLink("udp5", "", s.task.Client.Cnf.Crypt, s.task.Client.Cnf.Compress, c.RemoteAddr().String(), false, "")
 	target, err := s.bridge.SendLinkInfo(s.task.Client.Id, link, s.task)
 	if err != nil {
 		logs.Warn("get connection from client id %d  error %s", s.task.Client.Id, err.Error())
@@ -280,7 +334,7 @@ func (s *Sock5ModeServer) handleUDP(c net.Conn) {
 	}
 }
 
-//new conn
+// new conn
 func (s *Sock5ModeServer) handleConn(c net.Conn) {
 	buf := make([]byte, 2)
 	if _, err := io.ReadFull(c, buf); err != nil {
@@ -294,33 +348,62 @@ func (s *Sock5ModeServer) handleConn(c net.Conn) {
 		c.Close()
 		return
 	}
-	nMethods := buf[1]
+	nMethods := int(buf[1])
+	if nMethods == 0 {
+		logs.Warn("socks5 client offered no auth methods, remote %s", c.RemoteAddr())
+		c.Close()
+		return
+	}
 
 	methods := make([]byte, nMethods)
-	if len, err := c.Read(methods); len != int(nMethods) || err != nil {
+	if _, err := io.ReadFull(c, methods); err != nil {
 		logs.Warn("wrong method")
 		c.Close()
 		return
 	}
-	if (s.task.Client.Cnf.U != "" && s.task.Client.Cnf.P != "") || (s.task.MultiAccount != nil && len(s.task.MultiAccount.AccountMap) > 0) {
-		buf[1] = UserPassAuth
-		c.Write(buf)
+
+	needAuth := (s.task.Client.Cnf.U != "" && s.task.Client.Cnf.P != "") ||
+		(s.task.MultiAccount != nil && len(s.task.MultiAccount.AccountMap) > 0)
+
+	if needAuth {
+		if !methodOffered(methods, UserPassAuth) {
+			// Client cannot authenticate; reply no acceptable methods (RFC 1928).
+			_, _ = c.Write([]byte{5, 0xFF})
+			c.Close()
+			logs.Warn("socks5 client %s does not support username/password auth", c.RemoteAddr())
+			return
+		}
+		if _, err := c.Write([]byte{5, UserPassAuth}); err != nil {
+			c.Close()
+			return
+		}
 		if err := s.Auth(c); err != nil {
 			c.Close()
-			logs.Warn("Validation failed:", err)
+			logs.Warn("Validation failed: %v, remote %s", err, c.RemoteAddr())
 			return
 		}
 	} else {
-		buf[1] = 0
-		c.Write(buf)
+		if _, err := c.Write([]byte{5, 0}); err != nil {
+			c.Close()
+			return
+		}
 	}
 	s.handleRequest(c)
 }
 
-//socks5 auth
+func methodOffered(methods []byte, method byte) bool {
+	for _, m := range methods {
+		if m == method {
+			return true
+		}
+	}
+	return false
+}
+
+// socks5 auth (RFC 1929 username/password)
 func (s *Sock5ModeServer) Auth(c net.Conn) error {
-	header := []byte{0, 0}
-	if _, err := io.ReadAtLeast(c, header, 2); err != nil {
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(c, header); err != nil {
 		return err
 	}
 	if header[0] != userAuthVersion {
@@ -328,49 +411,46 @@ func (s *Sock5ModeServer) Auth(c net.Conn) error {
 	}
 	userLen := int(header[1])
 	user := make([]byte, userLen)
-	if _, err := io.ReadAtLeast(c, user, userLen); err != nil {
-		return err
+	if userLen > 0 {
+		if _, err := io.ReadFull(c, user); err != nil {
+			return err
+		}
 	}
-	if _, err := c.Read(header[:1]); err != nil {
+	plen := make([]byte, 1)
+	if _, err := io.ReadFull(c, plen); err != nil {
 		return errors.New("密码长度获取错误")
 	}
-	passLen := int(header[0])
+	passLen := int(plen[0])
 	pass := make([]byte, passLen)
-	if _, err := io.ReadAtLeast(c, pass, passLen); err != nil {
-		return err
+	if passLen > 0 {
+		if _, err := io.ReadFull(c, pass); err != nil {
+			return err
+		}
 	}
 
-	var U, P string
-	if s.task.MultiAccount != nil {
-		// enable multi user auth
-		U = string(user)
-		if len(U) == 0 {
-		        return errors.New("验证不通过")
-		}
-		var ok bool
-		P, ok = s.task.MultiAccount.AccountMap[U]
-		if !ok {
-			return errors.New("验证不通过")
+	ok := false
+	if s.task.MultiAccount != nil && len(s.task.MultiAccount.AccountMap) > 0 {
+		// multi-user auth
+		if expected, found := s.task.MultiAccount.AccountMap[string(user)]; found && string(pass) == expected {
+			ok = true
 		}
 	} else {
-		U = s.task.Client.Cnf.U
-		P = s.task.Client.Cnf.P
+		ok = string(user) == s.task.Client.Cnf.U && string(pass) == s.task.Client.Cnf.P
 	}
 
-	if string(user) == U && string(pass) == P {
+	if ok {
 		if _, err := c.Write([]byte{userAuthVersion, authSuccess}); err != nil {
 			return err
 		}
 		return nil
-	} else {
-		if _, err := c.Write([]byte{userAuthVersion, authFailure}); err != nil {
-			return err
-		}
-		return errors.New("验证不通过")
 	}
+	if _, err := c.Write([]byte{userAuthVersion, authFailure}); err != nil {
+		return err
+	}
+	return errors.New("验证不通过")
 }
 
-//start
+// start
 func (s *Sock5ModeServer) Start() error {
 	return conn.NewTcpListenerAndProcess(s.task.ServerIp+":"+strconv.Itoa(s.task.Port), func(c net.Conn) {
 		if err := s.CheckFlowAndConnNum(s.task.Client); err != nil {
@@ -384,7 +464,7 @@ func (s *Sock5ModeServer) Start() error {
 	}, &s.listener)
 }
 
-//new
+// new
 func NewSock5ModeServer(bridge NetBridge, task *file.Tunnel) *Sock5ModeServer {
 	s := new(Sock5ModeServer)
 	s.bridge = bridge
@@ -392,7 +472,7 @@ func NewSock5ModeServer(bridge NetBridge, task *file.Tunnel) *Sock5ModeServer {
 	return s
 }
 
-//close
+// close
 func (s *Sock5ModeServer) Close() error {
 	return s.listener.Close()
 }

@@ -1,12 +1,14 @@
 package controllers
 
 import (
+	"strings"
+	"time"
+
 	"ehang.io/nps/lib/common"
 	"ehang.io/nps/lib/file"
 	"ehang.io/nps/lib/rate"
 	"ehang.io/nps/server"
 	"github.com/astaxie/beego"
-	"strings"
 )
 
 type ClientController struct {
@@ -37,7 +39,7 @@ func (s *ClientController) List() {
 	s.AjaxTable(list, cnt, cnt, cmd)
 }
 
-//添加客户端
+// 添加客户端
 func (s *ClientController) Add() {
 	if s.Ctx.Request.Method == "GET" {
 		s.Data["menu"] = "client"
@@ -68,6 +70,11 @@ func (s *ClientController) Add() {
 				FlowLimit:  int64(s.GetIntNoErr("flow_limit")),
 			},
 			BlackIpList: RemoveRepeatedElement(strings.Split(s.getEscapeString("blackiplist"), "\r\n")),
+			IpWhite:     s.GetBoolNoErr("ipwhite"),
+			IpWhitePass: s.getEscapeString("ipwhitepass"),
+			IpWhiteList: RemoveRepeatedElement(strings.Split(s.getEscapeString("ipwhitelist"), "\r\n")),
+			ExpireTime:  normalizeExpireTime(s.getEscapeString("expire_time")),
+			CreateTime:  time.Now().Format("2006-01-02 15:04:05"),
 		}
 		if err := file.GetDb().NewClient(t); err != nil {
 			s.AjaxErr(err.Error())
@@ -90,7 +97,7 @@ func (s *ClientController) GetClient() {
 	}
 }
 
-//修改客户端
+// 修改客户端
 func (s *ClientController) Edit() {
 	id := s.GetIntNoErr("id")
 	if s.Ctx.Request.Method == "GET" {
@@ -100,6 +107,7 @@ func (s *ClientController) Edit() {
 		} else {
 			s.Data["c"] = c
 			s.Data["BlackIpList"] = strings.Join(c.BlackIpList, "\r\n")
+			s.Data["IpWhiteList"] = strings.Join(c.IpWhiteList, "\r\n")
 		}
 		s.SetInfo("edit client")
 		s.display()
@@ -126,6 +134,12 @@ func (s *ClientController) Edit() {
 				c.MaxConn = s.GetIntNoErr("max_conn")
 				c.MaxTunnelNum = s.GetIntNoErr("max_tunnel")
 			}
+			if s.GetString("flow_inlet") != "" {
+				c.Flow.InletFlow = int64(s.GetIntNoErr("flow_inlet"))
+			}
+			if s.GetString("flow_export") != "" {
+				c.Flow.ExportFlow = int64(s.GetIntNoErr("flow_export"))
+			}
 			c.Remark = s.getEscapeString("remark")
 			c.Cnf.U = s.getEscapeString("u")
 			c.Cnf.P = s.getEscapeString("p")
@@ -137,6 +151,9 @@ func (s *ClientController) Edit() {
 			}
 			c.WebPassword = s.getEscapeString("web_password")
 			c.ConfigConnAllow = s.GetBoolNoErr("config_conn_allow")
+			c.IpWhite = s.GetBoolNoErr("ipwhite")
+			c.IpWhitePass = s.getEscapeString("ipwhitepass")
+			c.IpWhiteList = RemoveRepeatedElement(strings.Split(s.getEscapeString("ipwhitelist"), "\r\n"))
 			if c.Rate != nil {
 				c.Rate.Stop()
 			}
@@ -144,11 +161,12 @@ func (s *ClientController) Edit() {
 				c.Rate = rate.NewRate(int64(c.RateLimit * 1024))
 				c.Rate.Start()
 			} else {
-				c.Rate = rate.NewRate(int64(2 << 23))
+				c.Rate = rate.NewRate((2 << 23) * 1024)
 				c.Rate.Start()
 			}
 
 			c.BlackIpList = RemoveRepeatedElement(strings.Split(s.getEscapeString("blackiplist"), "\r\n"))
+			c.ExpireTime = normalizeExpireTime(s.getEscapeString("expire_time"))
 			file.GetDb().JsonDb.StoreClientsToJsonFile()
 		}
 		s.AjaxOk("save success")
@@ -158,6 +176,10 @@ func (s *ClientController) Edit() {
 func RemoveRepeatedElement(arr []string) (newArr []string) {
 	newArr = make([]string, 0)
 	for i := 0; i < len(arr); i++ {
+		// 过滤空IP
+		if strings.TrimSpace(arr[i]) == "" {
+			continue
+		}
 		repeat := false
 		for j := i + 1; j < len(arr); j++ {
 			if arr[i] == arr[j] {
@@ -172,7 +194,40 @@ func RemoveRepeatedElement(arr []string) (newArr []string) {
 	return
 }
 
-//更改状态
+// expireTimeFormats 支持的到期时间输入格式
+var expireTimeFormats = []string{
+	"2006-01-02 15:04:05",
+	"2006-01-02 15:04",
+	"2006-01-02T15:04:05",
+	"2006-01-02T15:04",
+	"2006-01-02",
+}
+
+// ParseExpireTime 将多种格式的到期时间字符串解析为 time.Time
+// 留空或无法解析返回 ok=false
+func ParseExpireTime(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	for _, f := range expireTimeFormats {
+		if t, err := time.ParseInLocation(f, s, time.Local); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// normalizeExpireTime 将用户提交的到期时间统一为 "2006-01-02 15:04:05"
+// 无法解析则返回空串表示不限制
+func normalizeExpireTime(s string) string {
+	if t, ok := ParseExpireTime(s); ok {
+		return t.Format("2006-01-02 15:04:05")
+	}
+	return ""
+}
+
+// 更改状态
 func (s *ClientController) ChangeStatus() {
 	id := s.GetIntNoErr("id")
 	if client, err := file.GetDb().GetClient(id); err == nil {
@@ -185,7 +240,7 @@ func (s *ClientController) ChangeStatus() {
 	s.AjaxErr("modified fail")
 }
 
-//删除客户端
+// 删除客户端
 func (s *ClientController) Del() {
 	id := s.GetIntNoErr("id")
 	if err := file.GetDb().DelClient(id); err != nil {

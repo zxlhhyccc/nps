@@ -26,13 +26,14 @@ import (
 var (
 	Bridge  *bridge.Bridge
 	RunList sync.Map //map[int]interface{}
+	once    sync.Once
 )
 
 func init() {
 	RunList = sync.Map{}
 }
 
-//init task from db
+// init task from db
 func InitFromCsv() {
 	//Add a public password
 	if vkey := beego.AppConfig.String("public_vkey"); vkey != "" {
@@ -50,12 +51,12 @@ func InitFromCsv() {
 	})
 }
 
-//get bridge command
+// get bridge command
 func DealBridgeTask() {
 	for {
 		select {
 		case t := <-Bridge.OpenTask:
-			AddTask(t)
+			StartTask(t.Id)
 		case t := <-Bridge.CloseTask:
 			StopServer(t.Id)
 		case id := <-Bridge.CloseClient:
@@ -65,13 +66,11 @@ func DealBridgeTask() {
 					file.GetDb().DelClient(id)
 				}
 			}
-		case tunnel := <-Bridge.OpenTask:
-			StartTask(tunnel.Id)
 		case s := <-Bridge.SecretChan:
 			logs.Trace("New secret connection, addr", s.Conn.Conn.RemoteAddr())
 			if t := file.GetDb().GetTaskByMd5Password(s.Password); t != nil {
 				if t.Status {
-					go proxy.NewBaseServer(Bridge, t).DealClient(s.Conn, t.Client, t.Target.TargetStr, nil, common.CONN_TCP, nil, t.Flow, t.Target.LocalProxy, nil)
+					go proxy.NewBaseServer(Bridge, t).DealClient(s.Conn, t.Client, t.Target.TargetStr, nil, common.CONN_TCP, nil, t.Flow, t.Target.LocalProxy, nil, nil)
 				} else {
 					s.Conn.Close()
 					logs.Trace("This key %s cannot be processed,status is close", s.Password)
@@ -84,9 +83,15 @@ func DealBridgeTask() {
 	}
 }
 
-//start a new server
+// start a new server
 func StartNewServer(bridgePort int, cnf *file.Tunnel, bridgeType string, bridgeDisconnect int) {
 	Bridge = bridge.NewTunnel(bridgePort, bridgeType, common.GetBoolByStr(beego.AppConfig.String("ip_limit")), RunList, bridgeDisconnect)
+	// 启动流量持久化（只启动一次，避免每次 AddTask 创建泄漏的 goroutine）
+	if minute, err := beego.AppConfig.Int("flow_store_interval"); err == nil && minute > 0 {
+		go flowSession(time.Minute * time.Duration(minute))
+	}
+	// 启动后台 IO 速率采集，Dashboard 直接读缓存，无需 Sleep
+	tool.StartIORateCollector()
 	go func() {
 		if err := Bridge.StartTunnel(); err != nil {
 			logs.Error("start server bridge error", err)
@@ -100,6 +105,7 @@ func StartNewServer(bridgePort int, cnf *file.Tunnel, bridgeType string, bridgeD
 	}
 	go DealBridgeTask()
 	go dealClientFlow()
+	go dealClientExpire()
 	if svr := NewMode(Bridge, cnf); svr != nil {
 		if err := svr.Start(); err != nil {
 			logs.Error(err)
@@ -122,7 +128,51 @@ func dealClientFlow() {
 	}
 }
 
-//new a server by mode name
+// dealClientExpire 周期性扫描客户端到期时间，过期则自动暂停
+func dealClientExpire() {
+	// 启动时立即检查一次，避免重启后到期客户端最多 1 分钟内才被暂停
+	checkClientExpire()
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			checkClientExpire()
+		}
+	}
+}
+
+// checkClientExpire 遍历所有客户端，若 ExpireTime 已过则将 Status 置为 false 并断开连接
+func checkClientExpire() {
+	now := time.Now()
+	changed := false
+	file.GetDb().JsonDb.Clients.Range(func(key, value interface{}) bool {
+		v, ok := value.(*file.Client)
+		if !ok || v == nil {
+			return true
+		}
+		if v.ExpireTime == "" || !v.Status {
+			return true
+		}
+		t, err := time.ParseInLocation("2006-01-02 15:04:05", v.ExpireTime, time.Local)
+		if err != nil {
+			return true
+		}
+		if now.Before(t) {
+			return true
+		}
+		v.Status = false
+		changed = true
+		logs.Info("client id %d (remark: %s) expired at %s, auto paused", v.Id, v.Remark, v.ExpireTime)
+		DelClientConnect(v.Id)
+		return true
+	})
+	if changed {
+		file.GetDb().JsonDb.StoreClientsToJsonFile()
+	}
+}
+
+// new a server by mode name
 func NewMode(Bridge *bridge.Bridge, c *file.Tunnel) proxy.Service {
 	var service proxy.Service
 	switch c.Mode {
@@ -156,33 +206,28 @@ func NewMode(Bridge *bridge.Bridge, c *file.Tunnel) proxy.Service {
 	return service
 }
 
-//stop server
+// stop server
 func StopServer(id int) error {
-	//if v, ok := RunList[id]; ok {
 	if v, ok := RunList.Load(id); ok {
 		if svr, ok := v.(proxy.Service); ok {
 			if err := svr.Close(); err != nil {
-				return err
+				logs.Error("stop server id %d error", id, err)
 			}
-			logs.Info("stop server id %d", id)
 		} else {
 			logs.Warn("stop server id %d error", id)
 		}
-		if t, err := file.GetDb().GetTask(id); err != nil {
-			return err
-		} else {
+		RunList.Delete(id)
+		if t, err := file.GetDb().GetTask(id); err == nil {
 			t.Status = false
 			logs.Info("close port %d,remark %s,client id %d,task id %d", t.Port, t.Remark, t.Client.Id, t.Id)
 			file.GetDb().UpdateTask(t)
 		}
-		//delete(RunList, id)
-		RunList.Delete(id)
 		return nil
 	}
 	return errors.New("task is not running")
 }
 
-//add task
+// add task
 func AddTask(t *file.Tunnel) error {
 	if t.Mode == "secret" || t.Mode == "p2p" {
 		logs.Info("secret task %s start ", t.Remark)
@@ -193,9 +238,6 @@ func AddTask(t *file.Tunnel) error {
 	if b := tool.TestServerPort(t.Port, t.Mode); !b && t.Mode != "httpHostServer" {
 		logs.Error("taskId %d start error port %d open failed", t.Id, t.Port)
 		return errors.New("the port open error")
-	}
-	if minute, err := beego.AppConfig.Int("flow_store_interval"); err == nil && minute > 0 {
-		go flowSession(time.Minute * time.Duration(minute))
 	}
 	if svr := NewMode(Bridge, t); svr != nil {
 		logs.Info("tunnel task %s start mode：%s port %d", t.Remark, t.Mode, t.Port)
@@ -215,19 +257,21 @@ func AddTask(t *file.Tunnel) error {
 	return nil
 }
 
-//start task
+// start task
 func StartTask(id int) error {
-	if t, err := file.GetDb().GetTask(id); err != nil {
+	t, err := file.GetDb().GetTask(id)
+	if err != nil {
 		return err
-	} else {
-		AddTask(t)
-		t.Status = true
-		file.GetDb().UpdateTask(t)
 	}
+	if err := AddTask(t); err != nil {
+		return err
+	}
+	t.Status = true
+	file.GetDb().UpdateTask(t)
 	return nil
 }
 
-//delete task
+// delete task
 func DelTask(id int) error {
 	//if _, ok := RunList[id]; ok {
 	if _, ok := RunList.Load(id); ok {
@@ -238,51 +282,73 @@ func DelTask(id int) error {
 	return file.GetDb().DelTask(id)
 }
 
-//get task list by page num
-func GetTunnel(start, length int, typeVal string, clientId int, search string) ([]*file.Tunnel, int) {
-	list := make([]*file.Tunnel, 0)
-	var cnt int
-	keys := file.GetMapKeys(file.GetDb().JsonDb.Tasks, false, "", "")
-	for _, key := range keys {
-		if value, ok := file.GetDb().JsonDb.Tasks.Load(key); ok {
-			v := value.(*file.Tunnel)
-			if (typeVal != "" && v.Mode != typeVal || (clientId != 0 && v.Client.Id != clientId)) || (typeVal == "" && clientId != v.Client.Id) {
-				continue
+// get task list by page num
+func GetTunnel(start, length int, typeVal string, clientId int, search string, sortField string, order string) ([]*file.Tunnel, int) {
+	all_list := make([]*file.Tunnel, 0)
+
+	// collect + fill runtime fields before sort/paginate
+	file.GetDb().JsonDb.Tasks.Range(func(key, value interface{}) bool {
+		v := value.(*file.Tunnel)
+		if (typeVal != "" && v.Mode != typeVal || (clientId != 0 && v.Client.Id != clientId)) || (typeVal == "" && clientId != v.Client.Id) {
+			return true
+		}
+		if search != "" {
+			targetStr := ""
+			if v.Target != nil {
+				targetStr = v.Target.TargetStr
 			}
-			if search != "" && !(v.Id == common.GetIntNoErrByStr(search) || v.Port == common.GetIntNoErrByStr(search) || strings.Contains(v.Password, search) || strings.Contains(v.Remark, search) || strings.Contains(v.Client.VerifyKey, search)) {
-				continue
+			if !(v.Id == common.GetIntNoErrByStr(search) || v.Port == common.GetIntNoErrByStr(search) || strings.Contains(v.Password, search) || strings.Contains(v.Remark, search) || strings.Contains(targetStr, search)) {
+				return true
 			}
-			cnt++
+		}
+		if v.Client != nil {
 			if _, ok := Bridge.Client.Load(v.Client.Id); ok {
 				v.Client.IsConnect = true
 			} else {
 				v.Client.IsConnect = false
 			}
-			if start--; start < 0 {
-				if length--; length >= 0 {
-					//if _, ok := RunList[v.Id]; ok {
-					if _, ok := RunList.Load(v.Id); ok {
-						v.RunStatus = true
-					} else {
-						v.RunStatus = false
-					}
-					list = append(list, v)
-				}
-			}
 		}
+		if _, ok := RunList.Load(v.Id); ok {
+			v.RunStatus = true
+		} else {
+			v.RunStatus = false
+		}
+		all_list = append(all_list, v)
+		return true
+	})
+
+	file.SortTunnels(all_list, sortField, order)
+
+	cnt := len(all_list)
+	if start < 0 {
+		start = 0
 	}
-	return list, cnt
+	if length <= 0 || start >= cnt {
+		return []*file.Tunnel{}, cnt
+	}
+	end := start + length
+	if end > cnt {
+		end = cnt
+	}
+	return all_list[start:end], cnt
 }
 
-//get client list
-func GetClientList(start, length int, search, sort, order string, clientId int) (list []*file.Client, cnt int) {
-	list, cnt = file.GetDb().GetClientList(start, length, search, sort, order, clientId)
+// get client list
+func GetClientList(start, length int, search, sortField, order string, clientId int) (list []*file.Client, cnt int) {
+	// fill IsConnect / Version before sort so IsConnect ordering is correct
 	dealClientData()
+	list, cnt = file.GetDb().GetClientList(start, length, search, sortField, order, clientId)
 	return
 }
 
+// GetHostList returns hosts with client online status filled before sort/pagination.
+func GetHostList(start, length int, clientId int, search, sortField, order string) ([]*file.Host, int) {
+	// ensure Client.IsConnect is current for sort and display
+	dealClientData()
+	return file.GetDb().GetHost(start, length, clientId, search, sortField, order)
+}
+
 func dealClientData() {
-	//logs.Info("dealClientData.........")
 
 	file.GetDb().JsonDb.Clients.Range(func(key, value interface{}) bool {
 		v := value.(*file.Client)
@@ -293,40 +359,13 @@ func dealClientData() {
 		} else {
 			v.IsConnect = false
 		}
-		//v.Flow.InletFlow = 0
-		//v.Flow.ExportFlow = 0
-		//if len(file.GetDb().JsonDb.Hosts) == 0 {
-		//
-		//}
-		//var inflow int64 = 0
-		//var outflow int64 = 0
-		//file.GetDb().JsonDb.Hosts.Range(func(key, value interface{}) bool {
-		//	h := value.(*file.Host)
-		//	if h.Client.Id == v.Id {
-		//		inflow  += h.Flow.InletFlow
-		//		outflow += h.Flow.ExportFlow
-		//	}
-		//	return true
-		//})
-		//file.GetDb().JsonDb.Tasks.Range(func(key, value interface{}) bool {
-		//	t := value.(*file.Tunnel)
-		//	if t.Client.Id == v.Id {
-		//		inflow  += t.Flow.InletFlow
-		//		outflow += t.Flow.ExportFlow
-		//	}
-		//	return true
-		//})
-		//
-		//if inflow >0 || outflow >0{
-		//	v.Flow.InletFlow = inflow
-		//	v.Flow.ExportFlow = outflow
-		//}
+
 		return true
 	})
 	return
 }
 
-//delete all host and tasks by client id
+// delete all host and tasks by client id
 func DelTunnelAndHostByClientId(clientId int, justDelNoStore bool) {
 	var ids []int
 	file.GetDb().JsonDb.Tasks.Range(func(key, value interface{}) bool {
@@ -358,7 +397,7 @@ func DelTunnelAndHostByClientId(clientId int, justDelNoStore bool) {
 	}
 }
 
-//close the client
+// close the client
 func DelClientConnect(clientId int) {
 	Bridge.DelClient(clientId)
 }
@@ -438,39 +477,42 @@ func GetDashboardData() map[string]interface{} {
 	data["swap_mem"] = math.Round(swap.UsedPercent)
 	vir, _ := mem.VirtualMemory()
 	data["virtual_mem"] = math.Round(vir.UsedPercent)
-	conn, _ := net.ProtoCounters(nil)
-	io1, _ := net.IOCounters(false)
-	time.Sleep(time.Millisecond * 500)
-	io2, _ := net.IOCounters(false)
-	if len(io2) > 0 && len(io1) > 0 {
-		data["io_send"] = (io2[0].BytesSent - io1[0].BytesSent) * 2
-		data["io_recv"] = (io2[0].BytesRecv - io1[0].BytesRecv) * 2
+	// IO 速率从后台缓存读取，无需 Sleep 500ms
+	if cached, ok := tool.IORateCache.Load().(map[string]uint64); ok {
+		data["io_send"] = cached["io_send"]
+		data["io_recv"] = cached["io_recv"]
 	}
+	conn, _ := net.ProtoCounters(nil)
 	for _, v := range conn {
 		data[v.Protocol] = v.Stats["CurrEstab"]
 	}
 	//chart
 	var fg int
-	if len(tool.ServerStatus) >= 10 {
-		fg = len(tool.ServerStatus) / 10
+	tool.ServerStatusMu.RLock()
+	statusLen := len(tool.ServerStatus)
+	if statusLen >= 10 {
+		fg = statusLen / 10
 		for i := 0; i <= 9; i++ {
 			data["sys"+strconv.Itoa(i+1)] = tool.ServerStatus[i*fg]
 		}
 	}
+	tool.ServerStatusMu.RUnlock()
 	return data
 }
 
 // 实例化流量数据到文件
 func flowSession(m time.Duration) {
-	ticker := time.NewTicker(m)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			file.GetDb().JsonDb.StoreHostToJsonFile()
-			file.GetDb().JsonDb.StoreTasksToJsonFile()
-			file.GetDb().JsonDb.StoreClientsToJsonFile()
-			file.GetDb().JsonDb.StoreGlobalToJsonFile()
+	once.Do(func() {
+		ticker := time.NewTicker(m)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				file.GetDb().JsonDb.StoreHostToJsonFile()
+				file.GetDb().JsonDb.StoreTasksToJsonFile()
+				file.GetDb().JsonDb.StoreClientsToJsonFile()
+				file.GetDb().JsonDb.StoreGlobalToJsonFile()
+			}
 		}
-	}
+	})
 }

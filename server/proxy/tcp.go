@@ -1,10 +1,12 @@
+//go:build !npcgui
+// +build !npcgui
+
 package proxy
 
 import (
 	"errors"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strconv"
 
 	"ehang.io/nps/bridge"
@@ -12,6 +14,7 @@ import (
 	"ehang.io/nps/lib/conn"
 	"ehang.io/nps/lib/file"
 	"ehang.io/nps/server/connection"
+	"ehang.io/nps/web"
 	"github.com/astaxie/beego"
 	"github.com/astaxie/beego/logs"
 )
@@ -22,7 +25,7 @@ type TunnelModeServer struct {
 	listener net.Listener
 }
 
-//tcp|http|host
+// tcp|http|host
 func NewTunnelModeServer(process process, bridge NetBridge, task *file.Tunnel) *TunnelModeServer {
 	s := new(TunnelModeServer)
 	s.bridge = bridge
@@ -31,7 +34,7 @@ func NewTunnelModeServer(process process, bridge NetBridge, task *file.Tunnel) *
 	return s
 }
 
-//开始
+// 开始
 func (s *TunnelModeServer) Start() error {
 	return conn.NewTcpListenerAndProcess(s.task.ServerIp+":"+strconv.Itoa(s.task.Port), func(c net.Conn) {
 		if err := s.CheckFlowAndConnNum(s.task.Client); err != nil {
@@ -45,17 +48,17 @@ func (s *TunnelModeServer) Start() error {
 	}, &s.listener)
 }
 
-//close
+// close
 func (s *TunnelModeServer) Close() error {
 	return s.listener.Close()
 }
 
-//web管理方式
+// web管理方式
 type WebServer struct {
 	BaseServer
 }
 
-//开始
+// 开始
 func (s *WebServer) Start() error {
 	p, _ := beego.AppConfig.Int("web_port")
 	if p == 0 {
@@ -63,8 +66,8 @@ func (s *WebServer) Start() error {
 		<-stop
 	}
 	beego.BConfig.WebConfig.Session.SessionOn = true
-	beego.SetStaticPath(beego.AppConfig.String("web_base_url")+"/static", filepath.Join(common.GetRunPath(), "web", "static"))
-	beego.SetViewsPath(filepath.Join(common.GetRunPath(), "web", "views"))
+	// Serve management UI from embedded assets only (no disk web/ directory).
+	web.InitBeegoAssets()
 	err := errors.New("Web management startup failure ")
 	var l net.Listener
 	if l, err = connection.GetWebManagerListener(); err == nil {
@@ -86,7 +89,7 @@ func (s *WebServer) Close() error {
 	return nil
 }
 
-//new
+// new
 func NewWebServer(bridge *bridge.Bridge) *WebServer {
 	s := new(WebServer)
 	s.bridge = bridge
@@ -95,7 +98,7 @@ func NewWebServer(bridge *bridge.Bridge) *WebServer {
 
 type process func(c *conn.Conn, s *TunnelModeServer) error
 
-//tcp proxy
+// tcp proxy
 func ProcessTunnel(c *conn.Conn, s *TunnelModeServer) error {
 	targetAddr, err := s.task.Target.GetRandomTarget()
 	if err != nil {
@@ -103,26 +106,29 @@ func ProcessTunnel(c *conn.Conn, s *TunnelModeServer) error {
 		logs.Warn("tcp port %d ,client id %d,task id %d connect error %s", s.task.Port, s.task.Client.Id, s.task.Id, err.Error())
 		return err
 	}
-
-	return s.DealClient(c, s.task.Client, targetAddr, nil, common.CONN_TCP, nil, s.task.Client.Flow, s.task.Target.LocalProxy, s.task)
+	return s.DealClient(c, s.task.Client, targetAddr, nil, common.CONN_TCP, nil, s.task.Client.Flow, s.task.Target.LocalProxy, s.task, nil)
 }
 
-//http proxy
+// http proxy
 func ProcessHttp(c *conn.Conn, s *TunnelModeServer) error {
-
 	_, addr, rb, err, r := c.GetHost()
 	if err != nil {
 		c.Close()
 		logs.Info(err)
 		return err
 	}
-	if r.Method == "CONNECT" {
-		c.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
-		rb = nil
-	}
-	if err := s.auth(r, c, s.task.Client.Cnf.U, s.task.Client.Cnf.P); err != nil {
+	// Authenticate before establishing CONNECT tunnel (fixes auth-after-200 bug).
+	if err := s.proxyAuth(r, c, s.task.Client.Cnf.U, s.task.Client.Cnf.P); err != nil {
+		logs.Warn("http proxy auth failed, client %d, remote %s: %v", s.task.Client.Id, c.Conn.RemoteAddr(), err)
 		return err
 	}
-	return s.DealClient(c, s.task.Client, addr, rb, common.CONN_TCP, nil, s.task.Client.Flow, s.task.Target.LocalProxy, nil)
-
+	if r.Method == "CONNECT" {
+		if _, err := c.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); err != nil {
+			c.Close()
+			return err
+		}
+		rb = nil
+	}
+	logs.Info("http proxy request, method %s, host %s, client %d, remote %s", r.Method, addr, s.task.Client.Id, c.Conn.RemoteAddr())
+	return s.DealClient(c, s.task.Client, addr, rb, common.CONN_TCP, nil, s.task.Client.Flow, s.task.Target.LocalProxy, nil, nil)
 }

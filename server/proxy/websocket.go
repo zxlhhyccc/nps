@@ -99,8 +99,8 @@ func NewHttpReverseProxy(s *httpServer) *HttpReverseProxy {
 	local, _ := net.ResolveTCPAddr("tcp", "127.0.0.1")
 	proxy := NewReverseProxy(&httputil.ReverseProxy{
 		Director: func(r *http.Request) {
-			host := r.Context().Value("host").(*file.Host)
-			common.ChangeHostAndHeader(r, host.HostChange, host.HeaderChange, "")
+			//host := r.Context().Value("host").(*file.Host)
+			//common.ChangeHostAndHeader(r, host.HostChange, host.HeaderChange, "")
 		},
 		Transport: &http.Transport{
 			ResponseHeaderTimeout: rp.responseHeaderTimeout,
@@ -119,7 +119,7 @@ func NewHttpReverseProxy(s *httpServer) *HttpReverseProxy {
 				host = ctx.Value("host").(*file.Host)
 				targetAddr = ctx.Value("target").(string)
 
-				lk = conn.NewLink("http", targetAddr, host.Client.Cnf.Crypt, host.Client.Cnf.Compress, r.RemoteAddr, host.Target.LocalProxy)
+				lk = conn.NewLink("http", targetAddr, host.Client.Cnf.Crypt, host.Client.Cnf.Compress, r.RemoteAddr, host.Target.LocalProxy, "")
 				if target, err = s.bridge.SendLinkInfo(host.Client.Id, lk, nil); err != nil {
 					logs.Notice("connect to target %s error %s", lk.Host, err)
 					return nil, NewHTTPError(http.StatusBadGateway, "Cannot connect to the server")
@@ -150,7 +150,7 @@ func NewHttpReverseProxy(s *httpServer) *HttpReverseProxy {
 		host = ctx.Value("host").(*file.Host)
 		targetAddr = ctx.Value("target").(string)
 
-		lk = conn.NewLink("tcp", targetAddr, host.Client.Cnf.Crypt, host.Client.Cnf.Compress, r.RemoteAddr, host.Target.LocalProxy)
+		lk = conn.NewLink("tcp", targetAddr, host.Client.Cnf.Crypt, host.Client.Cnf.Compress, r.RemoteAddr, host.Target.LocalProxy, "")
 		if target, err = s.bridge.SendLinkInfo(host.Client.Id, lk, nil); err != nil {
 			logs.Notice("connect to target %s error %s", lk.Host, err)
 			return nil, NewHTTPError(http.StatusBadGateway, "Cannot connect to the target")
@@ -257,7 +257,7 @@ func Join(c1 io.ReadWriteCloser, c2 io.ReadWriteCloser, host *file.Host) (inCoun
 		defer to.Close()
 		defer from.Close()
 		defer wait.Done()
-		goroutine.CopyBuffer(to, from, host.Client.Flow, nil, "")
+		goroutine.CopyBuffer(to, from, host.Client.Flow, nil, host, "")
 		//*count, _ = io.Copy(to, from)
 	}
 

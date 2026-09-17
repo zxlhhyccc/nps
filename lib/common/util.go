@@ -265,8 +265,16 @@ func FormatAddress(s string) string {
 
 // get address from the complete address
 func GetIpByAddr(addr string) string {
-	arr := strings.Split(addr, ":")
-	return arr[0]
+	// 如果是 IPv6 地址，可能的格式为[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:8080或[2001:0db8:85a3:0000:0000:8a2e:0370:7334]
+	// IPv4 地址，可能的格式为192.168.1.1:80或192.168.1.1
+	// 截取地址
+	if strings.Contains(addr, "[") {
+		addr = strings.Split(addr, "[")[1]
+		addr = strings.Split(addr, "]")[0]
+	} else {
+		addr = strings.Split(addr, ":")[0]
+	}
+	return addr
 }
 
 // get port from the complete address
@@ -300,6 +308,17 @@ func IsBlackIp(ipPort, vkey string, blackIpList []string) bool {
 	}
 
 	return false
+}
+
+// 判断访问地址是否在白名单内
+func IsAuthIp(ipPort, vkey string, authIpList []string) bool {
+	ip := GetIpByAddr(ipPort)
+
+	if in(ip, authIpList) {
+		return false
+	}
+	logs.Error("IP地址[" + ip + "]不在隧道[" + vkey + "]白名单列表内")
+	return true
 }
 
 func CopyBuffer(dst io.Writer, src io.Reader, label ...string) (written int64, err error) {
@@ -461,6 +480,114 @@ func GetIntranetIp() (error, string) {
 		}
 	}
 	return errors.New("get intranet ip error"), ""
+}
+
+// isUsefulLocalIPv4 reports whether ip is a usable unicast IPv4 for display:
+// excludes loopback, link-local (169.254.0.0/16), unspecified and multicast.
+// No RFC1918 requirement, so non-standard private ranges used in practice
+// (e.g. 192.169.0.0/16) are kept.
+func isUsefulLocalIPv4(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	v4 := ip.To4()
+	if v4 == nil {
+		return false
+	}
+	return !v4.IsLoopback() && !v4.IsLinkLocalUnicast() && !v4.IsLinkLocalMulticast() && !v4.IsUnspecified() && !v4.IsMulticast()
+}
+
+// isUsefulPrivateIPv4 reports whether ip is a usable LAN IPv4 for display:
+// RFC1918 private only — excludes loopback, link-local (169.254.0.0/16), public, etc.
+func isUsefulPrivateIPv4(ip net.IP) bool {
+	if !isUsefulLocalIPv4(ip) {
+		return false
+	}
+	// RFC1918 only (not 169.254, not public)
+	return ip.To4().IsPrivate()
+}
+
+func ipFromAddr(addr net.Addr) net.IP {
+	if addr == nil {
+		return nil
+	}
+	switch a := addr.(type) {
+	case *net.TCPAddr:
+		return a.IP
+	case *net.UDPAddr:
+		return a.IP
+	default:
+		return net.ParseIP(GetIpByAddr(addr.String()))
+	}
+}
+
+// GetLocalIPs returns IPv4 addresses useful for identifying the npc host.
+// Prefers the local IP of conn (path toward nps). Falls back to the outbound
+// interface and finally an interface scan.
+// The connection path and outbound interface IPs are trusted as-is (only
+// loopback/link-local/etc. excluded), so non-standard private ranges such as
+// 192.169.0.0/16 are kept; the interface scan keeps RFC1918-only filtering.
+func GetLocalIPs(conn net.Conn) string {
+	seen := make(map[string]struct{})
+	ips := make([]string, 0, 4)
+
+	add := func(ip net.IP, privateOnly bool) {
+		if privateOnly {
+			if !isUsefulPrivateIPv4(ip) {
+				return
+			}
+		} else if !isUsefulLocalIPv4(ip) {
+			return
+		}
+		s := ip.To4().String()
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		ips = append(ips, s)
+	}
+
+	// 1) Local endpoint of the bridge connection — usually the real LAN IP used to reach nps.
+	if conn != nil {
+		add(ipFromAddr(conn.LocalAddr()), false)
+		// One correct path IP is enough for most hosts (avoids docker/vm junk alongside).
+		if len(ips) > 0 {
+			return ips[0]
+		}
+	}
+
+	// 2) Outbound interface toward the internet (same idea as GetLocalUdpAddr).
+	if tmp, err := net.Dial("udp", "114.114.114.114:53"); err == nil {
+		add(ipFromAddr(tmp.LocalAddr()), false)
+		_ = tmp.Close()
+		if len(ips) > 0 {
+			return ips[0]
+		}
+	}
+
+	// 3) Fallback: all up interfaces with private IPv4.
+	ifaces, err := net.Interfaces()
+	if err == nil {
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, address := range addrs {
+				if ipnet, ok := address.(*net.IPNet); ok {
+					add(ipnet.IP, true)
+				}
+			}
+		}
+	}
+
+	if len(ips) > 1 {
+		sort.Strings(ips)
+	}
+	return strings.Join(ips, ",")
 }
 
 func IsPublicIP(IP net.IP) bool {

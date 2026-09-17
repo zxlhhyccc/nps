@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ehang.io/nps/lib/common"
@@ -28,11 +29,12 @@ import (
 var ServerTlsEnable bool = false
 
 type Client struct {
+	mu        sync.Mutex // 保护 signal/tunnel/Version 等字段的并发读写
 	tunnel    *nps_mux.Mux
 	signal    *conn.Conn
 	file      *nps_mux.Mux
 	Version   string
-	retryTime int // it will be add 1 when ping not ok until to 3 will close the client
+	retryTime atomic.Int32 // it will be add 1 when ping not ok until to 3 will close the client
 }
 
 func NewClient(t, f *nps_mux.Mux, s *conn.Conn, vs string) *Client {
@@ -115,6 +117,37 @@ func (s *Bridge) StartTunnel() error {
 	return nil
 }
 
+// requestClientLocalAddr asks the client for private/LAN IPs on the main signal conn.
+// New clients reply with WriteLenContent; old clients ignore the flag and we time out.
+func (s *Bridge) requestClientLocalAddr(id int, c *conn.Conn) {
+	if c == nil || c.Conn == nil {
+		return
+	}
+	if _, err := c.Write([]byte(common.REPORT_LOCAL_IP)); err != nil {
+		return
+	}
+	_ = c.Conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	defer func() {
+		// clear deadline so health / later reads are not affected
+		_ = c.Conn.SetReadDeadline(time.Time{})
+	}()
+	b, err := c.GetShortLenContent()
+	if err != nil {
+		logs.Trace("clientId %d did not report local addr (old client or timeout): %v", id, err)
+		return
+	}
+	localAddr := strings.TrimSpace(string(b))
+	if localAddr == "" {
+		return
+	}
+	if client, err := file.GetDb().GetClient(id); err == nil {
+		client.Lock()
+		client.LocalAddr = localAddr
+		client.Unlock()
+		logs.Info("clientId %d local addr: %s", id, localAddr)
+	}
+}
+
 // get health information form client
 func (s *Bridge) GetHealthFromClient(id int, c *conn.Conn) {
 	for {
@@ -183,6 +216,7 @@ func (s *Bridge) GetHealthFromClient(id int, c *conn.Conn) {
 // 验证失败，返回错误验证flag，并且关闭连接
 func (s *Bridge) verifyError(c *conn.Conn) {
 	c.Write([]byte(common.VERIFY_EER))
+	c.Close()
 }
 
 func (s *Bridge) verifySuccess(c *conn.Conn) {
@@ -190,16 +224,19 @@ func (s *Bridge) verifySuccess(c *conn.Conn) {
 }
 
 func (s *Bridge) cliProcess(c *conn.Conn) {
+	// 握手 10s 超时：扫描/半开连接不会一直占着 goroutine；成功后清掉
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+
 	//read test flag
 	if _, err := c.GetShortContent(3); err != nil {
 		logs.Info("The client %s connect error", c.Conn.RemoteAddr(), err.Error())
+		c.Close()
 		return
 	}
-	//version check
-	if b, err := c.GetShortLenContent(); err != nil || string(b) != version.GetVersion() {
-		//logs.Info("The client %s version does not match", c.Conn.RemoteAddr())
-		//c.Close()
-		//return
+	//version check（版本不匹配仍兼容放行；读失败则断开）
+	if _, err := c.GetShortLenContent(); err != nil {
+		c.Close()
+		return
 	}
 	//version get
 	var vs []byte
@@ -211,7 +248,7 @@ func (s *Bridge) cliProcess(c *conn.Conn) {
 	}
 	//write server version to client
 	c.Write([]byte(crypt.Md5(version.GetVersion())))
-	c.SetReadDeadlineBySecond(5)
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var buf []byte
 	//get vKey from client
 	if buf, err = c.GetShortContent(32); err != nil {
@@ -228,17 +265,25 @@ func (s *Bridge) cliProcess(c *conn.Conn) {
 		s.verifySuccess(c)
 	}
 	if flag, err := c.ReadFlag(); err == nil {
+		// 握手完成，交给 typeDeal 做长连接
+		_ = c.SetReadDeadline(time.Time{})
 		s.typeDeal(flag, c, id, string(vs))
 	} else {
 		logs.Warn(err, flag)
+		c.Close()
 	}
 	return
 }
 
 func (s *Bridge) DelClient(id int) {
 	if v, ok := s.Client.Load(id); ok {
-		if v.(*Client).signal != nil {
-			v.(*Client).signal.Close()
+		cl := v.(*Client)
+		cl.mu.Lock()
+		signalToClose := cl.signal
+		cl.signal = nil
+		cl.mu.Unlock()
+		if signalToClose != nil {
+			signalToClose.Close()
 		}
 		s.Client.Delete(id)
 		if file.GetDb().IsPubClient(id) {
@@ -267,18 +312,32 @@ func (s *Bridge) typeDeal(typeVal string, c *conn.Conn, id int, vs string) {
 		}
 		//the vKey connect by another ,close the client of before
 		if v, ok := s.Client.LoadOrStore(id, NewClient(nil, nil, c, vs)); ok {
-			if v.(*Client).signal != nil {
-				v.(*Client).signal.WriteClose()
+			cl := v.(*Client)
+			cl.mu.Lock()
+			oldSignal := cl.signal
+			cl.signal = c
+			cl.Version = vs
+			cl.mu.Unlock()
+			cl.retryTime.Store(0)
+			if oldSignal != nil {
+				oldSignal.WriteClose()
 			}
-			v.(*Client).signal = c
-			v.(*Client).Version = vs
 		}
+		// Request private/LAN IPs from client. Old clients ignore the flag; short timeout keeps compatibility.
+		s.requestClientLocalAddr(id, c)
 		go s.GetHealthFromClient(id, c)
 		logs.Info("clientId %d connection succeeded, address:%s ", id, c.Conn.RemoteAddr())
 	case common.WORK_CHAN:
 		muxConn := nps_mux.NewMux(c.Conn, s.tunnelType, s.disconnectTime)
 		if v, ok := s.Client.LoadOrStore(id, NewClient(muxConn, nil, nil, vs)); ok {
-			v.(*Client).tunnel = muxConn
+			cl := v.(*Client)
+			cl.mu.Lock()
+			oldTunnel := cl.tunnel
+			cl.tunnel = muxConn
+			cl.mu.Unlock()
+			if oldTunnel != nil {
+				oldTunnel.Close()
+			}
 		}
 	case common.WORK_CONFIG:
 		client, err := file.GetDb().GetClient(id)
@@ -299,7 +358,14 @@ func (s *Bridge) typeDeal(typeVal string, c *conn.Conn, id int, vs string) {
 	case common.WORK_FILE:
 		muxConn := nps_mux.NewMux(c.Conn, s.tunnelType, s.disconnectTime)
 		if v, ok := s.Client.LoadOrStore(id, NewClient(nil, muxConn, nil, vs)); ok {
-			v.(*Client).file = muxConn
+			cl := v.(*Client)
+			cl.mu.Lock()
+			oldFile := cl.file
+			cl.file = muxConn
+			cl.mu.Unlock()
+			if oldFile != nil {
+				oldFile.Close()
+			}
 		}
 	case common.WORK_P2P:
 		//read md5 secret
@@ -311,15 +377,22 @@ func (s *Bridge) typeDeal(typeVal string, c *conn.Conn, id int, vs string) {
 			if v, ok := s.Client.Load(t.Client.Id); !ok {
 				return
 			} else {
+				cl := v.(*Client)
+				cl.mu.Lock()
+				sig := cl.signal
+				cl.mu.Unlock()
+				if sig == nil {
+					return
+				}
 				//向密钥对应的客户端发送与服务端udp建立连接信息，地址，密钥
-				v.(*Client).signal.Write([]byte(common.NEW_UDP_CONN))
+				sig.Write([]byte(common.NEW_UDP_CONN))
 				svrAddr := beego.AppConfig.String("p2p_ip") + ":" + beego.AppConfig.String("p2p_port")
 				if err != nil {
 					logs.Warn("get local udp addr error")
 					return
 				}
-				v.(*Client).signal.WriteLenContent([]byte(svrAddr))
-				v.(*Client).signal.WriteLenContent(b)
+				sig.WriteLenContent([]byte(svrAddr))
+				sig.WriteLenContent(b)
 				//向该请求者发送建立连接请求,服务器地址
 				c.WriteLenContent([]byte(svrAddr))
 			}
@@ -356,11 +429,14 @@ func (s *Bridge) SendLinkInfo(clientId int, link *conn.Link, t *file.Tunnel) (ta
 			}
 		}
 		var tunnel *nps_mux.Mux
+		cl := v.(*Client)
+		cl.mu.Lock()
 		if t != nil && t.Mode == "file" {
-			tunnel = v.(*Client).file
+			tunnel = cl.file
 		} else {
-			tunnel = v.(*Client).tunnel
+			tunnel = cl.tunnel
 		}
+		cl.mu.Unlock()
 		if tunnel == nil {
 			err = errors.New("the client connect error")
 			return
@@ -393,14 +469,19 @@ func (s *Bridge) ping() {
 			arr := make([]int, 0)
 			s.Client.Range(func(key, value interface{}) bool {
 				v := value.(*Client)
-				if v.tunnel == nil || v.signal == nil {
-					v.retryTime += 1
-					if v.retryTime >= 3 {
+				v.mu.Lock()
+				tunnel := v.tunnel
+				signal := v.signal
+				if tunnel == nil || signal == nil {
+					v.mu.Unlock()
+					if v.retryTime.Add(1) >= 3 {
 						arr = append(arr, key.(int))
 					}
 					return true
 				}
-				if v.tunnel.IsClose {
+				isClose := tunnel.IsClose()
+				v.mu.Unlock()
+				if isClose {
 					arr = append(arr, key.(int))
 				}
 				return true
